@@ -67,6 +67,12 @@ _lib_base_name = "llama"
 _lib = _load_shared_library(_lib_base_name)
 
 # C types
+LLAMA_FILE_VERSION = ctypes.c_int(1)
+LLAMA_FILE_MAGIC = b"ggjt"
+LLAMA_FILE_MAGIC_UNVERSIONED = b"ggml"
+LLAMA_SESSION_MAGIC = b"ggsn"
+LLAMA_SESSION_VERSION = ctypes.c_int(0)
+
 llama_context_p = c_void_p
 
 
@@ -77,12 +83,23 @@ llama_token_p = POINTER(llama_token)
 class llama_token_data(Structure):
     _fields_ = [
         ("id", llama_token),  # token id
+        ("logit", c_float),  # log-odds of the token
         ("p", c_float),  # probability of the token
-        ("plog", c_float),  # log probability of the token
     ]
 
 
 llama_token_data_p = POINTER(llama_token_data)
+
+
+class llama_token_data_array(Structure):
+    _fields_ = [
+        ("data", llama_token_data_p),
+        ("size", c_size_t),
+        ("sorted", c_bool),
+    ]
+
+
+llama_token_data_array_p = POINTER(llama_token_data_array)
 
 llama_progress_callback = ctypes.CFUNCTYPE(None, c_float, c_void_p)
 
@@ -118,7 +135,7 @@ LLAMA_FTYPE_MOSTLY_Q4_1_SOME_F16 = ctypes.c_int(
     4
 )  # tok_embeddings.weight and output.weight are F16
 LLAMA_FTYPE_MOSTLY_Q4_2 = ctypes.c_int(5)  # except 1d tensors
-LLAMA_FTYPE_MOSTYL_Q4_3 = ctypes.c_int(6)  # except 1d tensors
+# LLAMA_FTYPE_MOSTYL_Q4_3 = ctypes.c_int(6)  # except 1d tensors
 LLAMA_FTYPE_MOSTYL_Q8_0 = ctypes.c_int(7)  # except 1d tensors
 LLAMA_FTYPE_MOSTYL_Q5_0 = ctypes.c_int(8)  # except 1d tensors
 LLAMA_FTYPE_MOSTYL_Q5_1 = ctypes.c_int(9)  # except 1d tensors
@@ -401,31 +418,224 @@ _lib.llama_token_eos.argtypes = []
 _lib.llama_token_eos.restype = llama_token
 
 
-# TODO: improve the last_n_tokens interface ?
-def llama_sample_top_p_top_k(
+def llama_token_nl() -> llama_token:
+    return _lib.llama_token_nl()
+
+
+_lib.llama_token_nl.argtypes = []
+_lib.llama_token_nl.restype = llama_token
+
+
+# Sampling functions
+
+
+# @details Repetition penalty described in CTRL academic paper https://arxiv.org/abs/1909.05858, with negative logit fix.
+def llama_sample_repetition_penalty(
     ctx: llama_context_p,
-    last_n_tokens_data,  # type: Array[llama_token]
-    last_n_tokens_size: c_int,
-    top_k: c_int,
-    top_p: c_float,
-    temp: c_float,
-    repeat_penalty: c_float,
-) -> llama_token:
-    return _lib.llama_sample_top_p_top_k(
-        ctx, last_n_tokens_data, last_n_tokens_size, top_k, top_p, temp, repeat_penalty
+    candidates,
+    last_tokens_data,
+    last_tokens_size: c_int,
+    penalty: c_float,
+):
+    return _lib.llama_sample_repetition_penalty(
+        ctx, candidates, last_tokens_data, last_tokens_size, penalty
     )
 
 
-_lib.llama_sample_top_p_top_k.argtypes = [
+_lib.llama_sample_repetition_penalty.argtypes = [
     llama_context_p,
+    llama_token_data_array_p,
     llama_token_p,
     c_int,
-    c_int,
     c_float,
+]
+_lib.llama_sample_repetition_penalty.restype = None
+
+
+# @details Frequency and presence penalties described in OpenAI API https://platform.openai.com/docs/api-reference/parameter-details.
+def llama_sample_frequency_and_presence_penalties(
+    ctx: llama_context_p,
+    candidates,
+    last_tokens_data,
+    last_tokens_size: c_int,
+    alpha_frequency: c_float,
+    alpha_presence: c_float,
+):
+    return _lib.llama_sample_frequency_and_presence_penalties(
+        ctx,
+        candidates,
+        last_tokens_data,
+        last_tokens_size,
+        alpha_frequency,
+        alpha_presence,
+    )
+
+
+_lib.llama_sample_frequency_and_presence_penalties.argtypes = [
+    llama_context_p,
+    llama_token_data_array_p,
+    llama_token_p,
+    c_int,
     c_float,
     c_float,
 ]
-_lib.llama_sample_top_p_top_k.restype = llama_token
+_lib.llama_sample_frequency_and_presence_penalties.restype = None
+
+
+# @details Sorts candidate tokens by their logits in descending order and calculate probabilities based on logits.
+def llama_sample_softmax(ctx: llama_context_p, candidates):
+    return _lib.llama_sample_softmax(ctx, candidates)
+
+
+_lib.llama_sample_softmax.argtypes = [
+    llama_context_p,
+    llama_token_data_array_p,
+]
+_lib.llama_sample_softmax.restype = None
+
+
+# @details Top-K sampling described in academic paper "The Curious Case of Neural Text Degeneration" https://arxiv.org/abs/1904.09751
+def llama_sample_top_k(
+    ctx: llama_context_p, candidates, k: c_int, min_keep: c_size_t = c_size_t(1)
+):
+    return _lib.llama_sample_top_k(ctx, candidates, k, min_keep)
+
+
+_lib.llama_sample_top_k.argtypes = [
+    llama_context_p,
+    llama_token_data_array_p,
+    c_int,
+    c_size_t,
+]
+_lib.llama_sample_top_k.restype = None
+
+
+# @details Nucleus sampling described in academic paper "The Curious Case of Neural Text Degeneration" https://arxiv.org/abs/1904.09751
+def llama_sample_top_p(
+    ctx: llama_context_p, candidates, p: c_float, min_keep: c_size_t = c_size_t(1)
+):
+    return _lib.llama_sample_top_p(ctx, candidates, p, min_keep)
+
+
+_lib.llama_sample_top_p.argtypes = [
+    llama_context_p,
+    llama_token_data_array_p,
+    c_float,
+    c_size_t,
+]
+_lib.llama_sample_top_p.restype = None
+
+
+# @details Tail Free Sampling described in https://www.trentonbricken.com/Tail-Free-Sampling/.
+def llama_sample_tail_free(
+    ctx: llama_context_p, candidates, z: c_float, min_keep: c_size_t = c_size_t(1)
+):
+    return _lib.llama_sample_tail_free(ctx, candidates, z, min_keep)
+
+
+_lib.llama_sample_tail_free.argtypes = [
+    llama_context_p,
+    llama_token_data_array_p,
+    c_float,
+    c_size_t,
+]
+_lib.llama_sample_tail_free.restype = None
+
+
+# @details Locally Typical Sampling implementation described in the paper https://arxiv.org/abs/2202.00666.
+def llama_sample_typical(
+    ctx: llama_context_p, candidates, p: c_float, min_keep: c_size_t = c_size_t(1)
+):
+    return _lib.llama_sample_typical(ctx, candidates, p, min_keep)
+
+
+_lib.llama_sample_typical.argtypes = [
+    llama_context_p,
+    llama_token_data_array_p,
+    c_float,
+    c_size_t,
+]
+_lib.llama_sample_typical.restype = None
+
+
+def llama_sample_temperature(ctx: llama_context_p, candidates, temp: c_float):
+    return _lib.llama_sample_temperature(ctx, candidates, temp)
+
+
+_lib.llama_sample_temperature.argtypes = [
+    llama_context_p,
+    llama_token_data_array_p,
+    c_float,
+]
+_lib.llama_sample_temperature.restype = None
+
+
+# @details Mirostat 1.0 algorithm described in the paper https://arxiv.org/abs/2007.14966. Uses tokens instead of words.
+# @param candidates A vector of `llama_token_data` containing the candidate tokens, their probabilities (p), and log-odds (logit) for the current position in the generated text.
+# @param tau  The target cross-entropy (or surprise) value you want to achieve for the generated text. A higher value corresponds to more surprising or less predictable text, while a lower value corresponds to less surprising or more predictable text.
+# @param eta The learning rate used to update `mu` based on the error between the target and observed surprisal of the sampled word. A larger learning rate will cause `mu` to be updated more quickly, while a smaller learning rate will result in slower updates.
+# @param m The number of tokens considered in the estimation of `s_hat`. This is an arbitrary value that is used to calculate `s_hat`, which in turn helps to calculate the value of `k`. In the paper, they use `m = 100`, but you can experiment with different values to see how it affects the performance of the algorithm.
+# @param mu Maximum cross-entropy. This value is initialized to be twice the target cross-entropy (`2 * tau`) and is updated in the algorithm based on the error between the target and observed surprisal.
+def llama_sample_token_mirostat(
+    ctx: llama_context_p, candidates, tau: c_float, eta: c_float, m: c_int, mu
+) -> llama_token:
+    return _lib.llama_sample_token_mirostat(ctx, candidates, tau, eta, m, mu)
+
+
+_lib.llama_sample_token_mirostat.argtypes = [
+    llama_context_p,
+    llama_token_data_array_p,
+    c_float,
+    c_float,
+    c_int,
+    POINTER(c_float),
+]
+_lib.llama_sample_token_mirostat.restype = llama_token
+
+
+# @details Mirostat 2.0 algorithm described in the paper https://arxiv.org/abs/2007.14966. Uses tokens instead of words.
+# @param candidates A vector of `llama_token_data` containing the candidate tokens, their probabilities (p), and log-odds (logit) for the current position in the generated text.
+# @param tau  The target cross-entropy (or surprise) value you want to achieve for the generated text. A higher value corresponds to more surprising or less predictable text, while a lower value corresponds to less surprising or more predictable text.
+# @param eta The learning rate used to update `mu` based on the error between the target and observed surprisal of the sampled word. A larger learning rate will cause `mu` to be updated more quickly, while a smaller learning rate will result in slower updates.
+# @param mu Maximum cross-entropy. This value is initialized to be twice the target cross-entropy (`2 * tau`) and is updated in the algorithm based on the error between the target and observed surprisal.
+def llama_sample_token_mirostat_v2(
+    ctx: llama_context_p, candidates, tau: c_float, eta: c_float, mu
+) -> llama_token:
+    return _lib.llama_sample_token_mirostat_v2(ctx, candidates, tau, eta, mu)
+
+
+_lib.llama_sample_token_mirostat_v2.argtypes = [
+    llama_context_p,
+    llama_token_data_array_p,
+    c_float,
+    c_float,
+    POINTER(c_float),
+]
+_lib.llama_sample_token_mirostat_v2.restype = llama_token
+
+
+# @details Selects the token with the highest probability.
+def llama_sample_token_greedy(ctx: llama_context_p, candidates) -> llama_token:
+    return _lib.llama_sample_token_greedy(ctx, candidates)
+
+
+_lib.llama_sample_token_greedy.argtypes = [
+    llama_context_p,
+    llama_token_data_array_p,
+]
+_lib.llama_sample_token_greedy.restype = llama_token
+
+
+# @details Randomly selects a token from the candidates based on their probabilities.
+def llama_sample_token(ctx: llama_context_p, candidates) -> llama_token:
+    return _lib.llama_sample_token(ctx, candidates)
+
+
+_lib.llama_sample_token.argtypes = [
+    llama_context_p,
+    llama_token_data_array_p,
+]
+_lib.llama_sample_token.restype = llama_token
 
 
 # Performance information
