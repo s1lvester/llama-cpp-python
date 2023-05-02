@@ -306,7 +306,7 @@ class Llama:
             llama_cpp.llama_sample_typical(
                 ctx=self.ctx,
                 candidates=llama_cpp.ctypes.pointer(candidates),
-                p=llama_cpp.c_float(1.0)
+                p=llama_cpp.c_float(1.0),
             )
             llama_cpp.llama_sample_top_p(
                 ctx=self.ctx,
@@ -637,10 +637,7 @@ class Llama:
                 self.detokenize([token]).decode("utf-8", errors="ignore")
                 for token in all_tokens
             ]
-            all_logprobs = [
-                [Llama.logit_to_logprob(logit) for logit in row]
-                for row in self.eval_logits
-            ]
+            all_logprobs = [Llama._logits_to_logprobs(row) for row in self.eval_logits]
             for token, token_str, logprobs_token in zip(
                 all_tokens, all_token_strs, all_logprobs
             ):
@@ -980,5 +977,7 @@ class Llama:
         return llama_cpp.llama_token_bos()
 
     @staticmethod
-    def logit_to_logprob(x: float) -> float:
-        return math.log(1.0 + math.exp(x))
+    def logits_to_logprobs(logits: List[llama_cpp.c_float]) -> List[llama_cpp.c_float]:
+        exps = [math.exp(float(x)) for x in logits]
+        sum_exps = sum(exps)
+        return [llama_cpp.c_float(math.log(x / sum_exps)) for x in exps]
